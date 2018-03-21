@@ -69,16 +69,12 @@ class ToolingApiBackedGradleSession implements GradleSession {
         BuildLauncher buildLauncher = configureLauncher(invocation, tasksToRun)
 
         return { MeasuredOperation measuredOperation ->
-            invocationInfo.profiler.stop()
             if (cleanLauncher != null) {
                 System.out.println("Cleaning up by running Gradle tasks: " + Joiner.on(" ").join(cleanTasks));
                 cleanLauncher.run()
             }
             System.out.println("Measuring Gradle tasks: " + Joiner.on(" ").join(tasksToRun));
 
-            if (invocationInfo.phase == BuildExperimentRunner.Phase.MEASUREMENT) {
-                invocationInfo.profiler.start()
-            }
             def experiment = invocationInfo.buildExperimentSpec
             def listener = experiment.getListener()
             if (listener != null) {

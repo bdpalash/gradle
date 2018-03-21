@@ -54,7 +54,6 @@ class ForkingGradleSession implements GradleSession {
     Action<MeasuredOperation> runner(BuildExperimentInvocationInfo invocationInfo, InvocationCustomizer invocationCustomizer, MeasurementCallback measurementCallback) {
         def invocation = invocationCustomizer ? invocationCustomizer.customize(invocationInfo, this.invocation) : this.invocation
         return { MeasuredOperation measuredOperation ->
-            invocationInfo.profiler.stop()
             def cleanTasks = invocation.cleanTasks
             if (cleanTasks) {
                 System.out.println("Cleaning up by running Gradle tasks: " + Joiner.on(" ").join(cleanTasks));
@@ -63,9 +62,6 @@ class ForkingGradleSession implements GradleSession {
             def tasksToRun = invocation.tasksToRun
             System.out.println("Measuring Gradle tasks: " + Joiner.on(" ").join(tasksToRun));
 
-            if (invocationInfo.phase == BuildExperimentRunner.Phase.MEASUREMENT) {
-                invocationInfo.profiler.start()
-            }
             def experiment = invocationInfo.buildExperimentSpec
             def listener = experiment.getListener()
             if (listener != null) {

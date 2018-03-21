@@ -16,31 +16,47 @@
 
 package org.gradle.performance.fixture
 
+import com.github.chrishantha.jfr.flamegraph.output.Application
+import com.google.common.base.Charsets
+import com.google.common.io.Files
+import com.google.common.io.Resources
 import groovy.transform.CompileStatic
 import groovy.util.logging.Log
 import org.gradle.internal.os.OperatingSystem
 import org.gradle.performance.measure.MeasuredOperation
 
+/**
+ * TODO create memory, IO, locking flame graphs
+ * TODO create flame graph diffs
+ * TODO support pause/resume so we can exclude clean tasks from measurement
+ * TODO refactor out helpers (pid instrumentation, flame graphs, jcmd, profile directory structure)
+ * TODO simplify flame graphs more, e.g. collapse task executor chain, build operation handling etc
+ * TODO maybe create "raw" flame graphs too, for cases when above mentioned things actually regress
+ */
 @CompileStatic
 @Log
-class JfrProfiler implements DataCollector {
+class JfrProfiler implements Profiler {
     private static final String TARGET_DIR_KEY = "org.gradle.performance.flameGraphTargetDir"
 
     final boolean enabled
 
-    private final boolean canGenerateFlameGraphs
     private final File logDirectory
-    private final File jcmd
+    private final File jcmdExecutable
+    private final File pidFile
+    private final File pidFileInitScript
+    private final File flamegraphScript
 
-    String sessionId
     boolean usesDaemon
-    private boolean running
+    String versionUnderTest
+    String scenarioUnderTest
 
     JfrProfiler() {
         enabled = System.getProperty(TARGET_DIR_KEY) != null
         logDirectory = enabled ? new File(System.getProperty(TARGET_DIR_KEY)) : null
-        canGenerateFlameGraphs = locateFlameGraphInstallation().exists()
-        this.jcmd = findJcmd()
+        jcmdExecutable = findJcmd()
+        pidFile = createPidFile()
+        pidFileInitScript = createPidFileInitScript(pidFile)
+        flamegraphScript = createFlamegraphScript()
     }
 
     private static File findJcmd() {
@@ -56,6 +72,36 @@ class JfrProfiler implements DataCollector {
         jcmd
     }
 
+    private static File createFlamegraphScript() {
+        URL flamegraphResource = JfrProfiler.classLoader.getResource("org/gradle/reporting/flamegraph.pl")
+        def flamegraphScript = File.createTempFile("flamegraph", ".pl")
+        flamegraphScript.deleteOnExit()
+        Resources.asCharSource(flamegraphResource, Charsets.UTF_8).copyTo(Files.asCharSink(flamegraphScript, Charsets.UTF_8))
+        flamegraphScript.setExecutable(true)
+        flamegraphScript
+    }
+
+    private static File createPidFile() {
+        def pidFile = File.createTempFile("build-under-test", ".pid")
+        pidFile.deleteOnExit()
+        pidFile
+    }
+
+    private static File createPidFileInitScript(File pidFile) {
+        def pidFileInitScript = File.createTempFile("pid-instrumentation", ".gradle")
+        pidFileInitScript.deleteOnExit()
+        pidFileInitScript.text = """
+            def e
+            if (gradleVersion == '2.0') {
+              e = services.get(org.gradle.internal.nativeplatform.ProcessEnvironment)
+            } else {
+              e = services.get(org.gradle.internal.nativeintegration.ProcessEnvironment)
+            }
+            new File(new URI('${pidFile.toURI()}')).text = e.pid
+        """
+        pidFileInitScript
+    }
+
     @Override
     List<String> getAdditionalJvmOpts(File workingDir) {
         if (!enabled) {
@@ -63,22 +109,18 @@ class JfrProfiler implements DataCollector {
         }
         String flightRecordOptions = "stackdepth=1024"
         if (!usesDaemon) {
-            flightRecordOptions += ",defaultRecording=true,dumponexit=true,dumponexitpath=$destFile,settings=profile"
+            flightRecordOptions += ",defaultRecording=true,dumponexit=true,dumponexitpath=$jfrFile,settings=profile"
         }
         ["-XX:+UnlockCommercialFeatures", "-XX:+FlightRecorder", "-XX:FlightRecorderOptions=$flightRecordOptions", "-XX:+UnlockDiagnosticVMOptions", "-XX:+DebugNonSafepoints"] as List<String>
     }
 
-    private static File locateFlameGraphInstallation() {
-        new File(System.getenv("FG_HOME_DIR") ?: "${System.getProperty('user.home')}/tools/FlameGraph".toString())
-    }
-
-    private static File locateJfrFlameGraphInstallation() {
-        new File(System.getenv("JFR_FG_HOME_DIR") ?: "${System.getProperty('user.home')}/tools/jfr-flameGraph".toString())
-    }
 
     @Override
     List<String> getAdditionalArgs(File workingDir) {
-        return Collections.emptyList();
+        if (!enabled) {
+            return Collections.emptyList()
+        }
+        return ["--init-script", pidFileInitScript.absolutePath] as List<String>
     }
 
     @Override
@@ -86,67 +128,93 @@ class JfrProfiler implements DataCollector {
         if (!enabled) {
             return
         }
+        if (invocationInfo.iterationNumber == invocationInfo.iterationMax && invocationInfo.phase == BuildExperimentRunner.Phase.WARMUP) {
+            start()
+        }
         if (invocationInfo.iterationNumber == invocationInfo.iterationMax && invocationInfo.phase == BuildExperimentRunner.Phase.MEASUREMENT) {
-            if (usesDaemon) {
-                dump()
-            }
-            if (canGenerateFlameGraphs) {
-                def stacksFile = new File(logDirectory, "${sessionId}-stacks.txt")
-                collapseStacks(destFile, stacksFile)
-                def sanitizedStacksFile = new File(logDirectory, "${stacksFile.name}.sanitized")
-                sanitizeStacks(stacksFile, sanitizedStacksFile)
-                def svgDestFile = new File(logDirectory, "${sessionId}-flames.svg")
-                generateFlameGraph(sanitizedStacksFile, svgDestFile)
-            }
+            logDirectory.mkdirs()
+            stop()
+            collapseStacks()
+            sanitizeStacks()
+            generateFlameGraph()
+            generateIcicleGraph()
         }
     }
 
-    private File getDestFile() {
-        new File(logDirectory, "${sessionId}.jfr")
+    private void collapseStacks() {
+        Application.main("-f", jfrFile.absolutePath, "-o", stacksFile.absolutePath, "-ha", "-i")
     }
 
-
-    private static void collapseStacks(File recording, File stacks) {
-
-    }
-
-    private static void sanitizeStacks(File stacks, File sanitizedStacks) {
+    private void sanitizeStacks() {
         FlameGraphSanitizer flameGraphSanitizer = new FlameGraphSanitizer(new FlameGraphSanitizer.RegexBasedSanitizerFunction(
             (~'build_([a-z0-9]+)'): 'build script',
             (~'settings_([a-z0-9]+)'): 'settings script',
             (~'org[.]gradle[.]'): '',
-            (~'sun[.]reflect[.]GeneratedMethodAccessor[0-9]+'): 'GeneratedMethodAccessor'
+            (~'sun[.]reflect[.]GeneratedMethodAccessor[0-9]+'): 'GeneratedMethodAccessor',
+            (~'com[.]sun[.]proxy[.][$]Proxy[0-9]+'): 'Proxy'
         ))
-        flameGraphSanitizer.sanitize(stacks, sanitizedStacks)
+        flameGraphSanitizer.sanitize(stacksFile, sanitizedStacksFile)
     }
 
-    private static void generateFlameGraph(File sanitizedOutput, File svgDestFile) {
-        File flameGraphHomeDir = locateFlameGraphInstallation()
-        def process = ["$flameGraphHomeDir/flamegraph.pl", "--minwidth", "0.5", sanitizedOutput].execute()
-        def fos = svgDestFile.newOutputStream()
+    private void generateFlameGraph() {
+        invokeFlamegraphScript(sanitizedStacksFile, flamesFile, "--minwidth", "1")
+    }
+
+    private void generateIcicleGraph() {
+        invokeFlamegraphScript(sanitizedStacksFile, iciclesFile, "--minwidth", "1", "--reverse", "--invert")
+    }
+
+    private void invokeFlamegraphScript(File input, File output, String... args) {
+        def process = ([flamegraphScript.absolutePath, input.absolutePath] + args.toList()).execute()
+        def fos = output.newOutputStream()
         process.waitForProcessOutput(fos, System.err)
         fos.close()
     }
 
+    private File file(String name) {
+        def fileSafeScenarioName = scenarioUnderTest.replaceAll('[^a-zA-Z0-9.-]', '-').replaceAll('-+', '-')
+        new File(logDirectory, fileSafeScenarioName + "/" + versionUnderTest + "/" + name)
+    }
+
+    private File getJfrFile() {
+        file("profile.jfr")
+    }
+
+    private File getStacksFile() {
+        file("stacks.txt")
+    }
+
+    private File getSanitizedStacksFile() {
+        file("sanitized-stacks.txt")
+    }
+
+    private File getFlamesFile() {
+        file("flames.svg")
+    }
+
+    private File getIciclesFile() {
+        file("icicles.svg")
+    }
+
     void start() {
-        if (enabled && usesDaemon && !running) {
-            jcmd("JFR.start", "settings=profile")
+        if (enabled && usesDaemon) {
+            jcmd(pid, "JFR.start", "name=profile", "settings=profile")
         }
     }
 
     void stop() {
-        if (enabled && usesDaemon && running) {
-            jcmd("JFR.stop")
+        if (enabled && usesDaemon) {
+            jcmd(pid, "JFR.stop", "name=profile", "filename=${jfrFile}")
         }
     }
 
-    private void dump() {
-        jcmd("JFR.stop", "fileName=${destFile}")
-    }
-
     private void jcmd(String... args) {
-        def processArguments = [jcmd.absolutePath] + args.toList()
+        def processArguments = [jcmdExecutable.absolutePath] + args.toList()
         def process = processArguments.execute()
         process.waitForProcessOutput(System.out as Appendable, System.err as Appendable)
+    }
+
+    private String getPid() {
+        pidFile.text
     }
 }

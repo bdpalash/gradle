@@ -16,11 +16,62 @@
 
 package org.gradle.performance.fixture;
 
+import org.gradle.performance.measure.MeasuredOperation;
+
+import java.io.File;
+import java.util.Collections;
 import java.util.List;
-import java.util.Map;
 
-public interface Profiler {
-    void addProfilerDefaults(GradleInvocationSpec.InvocationBuilder invocation);
+public interface Profiler extends DataCollector {
 
-    List<String> profilerArguments(Map<String, Object> yourkitOptions);
+    void start();
+
+    void stop();
+
+    void setVersionUnderTest(String version);
+
+    void setScenarioUnderTest(String scenario)
+
+    class NoOpProfiler implements Profiler {
+        public static final Profiler INSTANCE = new NoOpProfiler();
+
+        private NoOpProfiler() {
+
+        }
+
+        @Override
+        public void start() {
+
+        }
+
+        @Override
+        public void stop() {
+
+        }
+
+        @Override
+        public void setVersionUnderTest(String version) {
+
+        }
+
+        @Override
+        public void setScenarioUnderTest(String scenario) {
+
+        }
+
+        @Override
+        public List<String> getAdditionalJvmOpts(File workingDir) {
+            return Collections.emptyList();
+        }
+
+        @Override
+        public List<String> getAdditionalArgs(File workingDir) {
+            return Collections.emptyList();
+        }
+
+        @Override
+        public void collect(BuildExperimentInvocationInfo invocationInfo, MeasuredOperation operation) {
+
+        }
+    }
 }

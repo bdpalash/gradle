@@ -21,8 +21,6 @@ import org.gradle.performance.AbstractCrossVersionPerformanceTest
 import org.gradle.performance.fixture.BuildExperimentInvocationInfo
 import org.gradle.performance.fixture.BuildExperimentListener
 import org.gradle.performance.fixture.BuildExperimentListenerAdapter
-import org.gradle.performance.fixture.BuildExperimentRunner
-import org.gradle.performance.fixture.LogFiles
 import org.gradle.performance.measure.MeasuredOperation
 import spock.lang.Ignore
 import spock.lang.Unroll
@@ -97,15 +95,9 @@ class RealWorldNativePluginPerformanceTest extends AbstractCrossVersionPerforman
                     println "Changing $file"
                     // do change
                     changeClosure(file, originalContent)
-                    if (invocationInfo.phase == BuildExperimentRunner.Phase.MEASUREMENT) {
-                        invocationInfo.profiler.start()
-                    }
                 } else if (invocationInfo.iterationNumber > 2) {
                     println "Reverting $file"
                     file.text = originalContent
-                    if (invocationInfo.phase == BuildExperimentRunner.Phase.MEASUREMENT) {
-                        invocationInfo.profiler.stop()
-                    }
                 }
             }
 

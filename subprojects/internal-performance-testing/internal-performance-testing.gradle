@@ -22,10 +22,15 @@ plugins {
 
 configurations {
     reports
+    shadow
+    compileOnly {
+        extendsFrom shadow
+    }
 }
 
 repositories {
     javaScript.googleApis()
+    maven { url 'https://jitpack.io' }
 }
 
 dependencies {
@@ -38,6 +43,7 @@ dependencies {
     compile project(':internalIntegTesting')
     compile libraries.jatl.coordinates
     compile libraries.jgit.coordinates, libraries.commons_httpclient.coordinates, libraries.jsch.coordinates
+    shadow 'com.github.oehme:jfr-flame-graph:v0.0.5:all'
 
     runtime 'com.h2database:h2:1.4.192'
 }
@@ -54,6 +60,11 @@ task reportResources(type: Copy) {
 }
 
 sourceSets.main.output.dir generatedResourcesDir, builtBy: reportResources
+
+jar {
+    inputs.files configurations.shadow
+    from files { configurations.shadow.collect { zipTree(it) } }
+}
 
 testFixtures {
     from(':core', 'main')
